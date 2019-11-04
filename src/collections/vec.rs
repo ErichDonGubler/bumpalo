@@ -9,14 +9,14 @@
 // except according to those terms.
 
 //! A contiguous growable array type with heap-allocated contents, written
-//! `Vec<'bump, T>`.
+//! `Vec<T, B>`.
 //!
 //! Vectors have `O(1)` indexing, amortized `O(1)` push (to the end) and
 //! `O(1)` pop (from the end).
 //!
 //! # Examples
 //!
-//! You can explicitly create a [`Vec<'bump, T>`] with [`new`]:
+//! You can explicitly create a [`Vec<T, B>`] with [`new`]:
 //!
 //! ```
 //! use bumpalo::{Bump, collections::Vec};
@@ -76,15 +76,20 @@
 //! v[1] = v[1] + 5;
 //! ```
 //!
-//! [`Vec<'bump, T>`]: ./struct.Vec.html
+//! [`Vec<T, B>`]: ./struct.Vec.html
 //! [`new`]: ./struct.Vec.html#method.new
 //! [`push`]: ./struct.Vec.html#method.push
 //! [`Index`]: https://doc.rust-lang.org/nightly/std/ops/trait.Index.html
 //! [`IndexMut`]: ../../std/ops/trait.IndexMut.html
 //! [`vec!`]: ../../macro.vec.html
 
-use super::raw_vec::RawVec;
-use crate::Bump;
+use alloc_wg::{
+    alloc::{AbortAlloc, AllocRef, BuildAllocRef, DeallocRef, Global, ReallocRef},
+    collections::CollectionAllocErr,
+    raw_vec::RawVec,
+    Never,
+};
+use crate::{Bump};
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{self, Hash};
@@ -267,7 +272,7 @@ macro_rules! vec {
     (in $bump:expr; $(, $x:expr,)*) => (bumpalo::vec![in $bump; $($x),*])
 }
 
-/// A contiguous growable array type, written `Vec<'bump, T>` but pronounced 'vector'.
+/// A contiguous growable array type, written `Vec<T, B>` but pronounced 'vector'.
 ///
 /// # Examples
 ///
@@ -309,7 +314,7 @@ macro_rules! vec {
 /// assert_eq!(vec, [1, 2, 3, 4]);
 /// ```
 ///
-/// It can also initialize each element of a `Vec<'bump, T>` with a given value.
+/// It can also initialize each element of a `Vec<T, B>` with a given value.
 /// This may be more efficient than performing allocation and initialization
 /// in separate steps, especially when initializing a vector of zeros:
 ///
@@ -326,7 +331,7 @@ macro_rules! vec {
 /// vec1.resize(5, 0);
 /// ```
 ///
-/// Use a `Vec<'bump, T>` as an efficient stack:
+/// Use a `Vec<T, B>` as an efficient stack:
 ///
 /// ```
 /// use bumpalo::{Bump, collections::Vec};
@@ -421,7 +426,7 @@ macro_rules! vec {
 /// Due to its incredibly fundamental nature, `Vec` makes a lot of guarantees
 /// about its design. This ensures that it's as low-overhead as possible in
 /// the general case, and can be correctly manipulated in primitive ways
-/// by unsafe code. Note that these guarantees refer to an unqualified `Vec<'bump, T>`.
+/// by unsafe code. Note that these guarantees refer to an unqualified `Vec<T, B>`.
 /// If additional type parameters are added (e.g. to support custom allocators),
 /// overriding their defaults may change the behavior.
 ///
@@ -480,7 +485,7 @@ macro_rules! vec {
 /// `bumpalo::vec![in bump; x; n]`, `bumpalo::vec![in bump; a, b, c, d]`, and
 /// [`Vec::with_capacity_in(n)`][`Vec::with_capacity_in`], will all produce a
 /// `Vec` with exactly the requested capacity. If [`len`]` == `[`capacity`], (as
-/// is the case for the [`vec!`] macro), then a `Vec<'bump, T>` can be converted
+/// is the case for the [`vec!`] macro), then a `Vec<T, B>` can be converted
 /// to and from a [`Box<[T]>`][owned slice] without reallocating or moving the
 /// elements.
 ///
@@ -512,8 +517,12 @@ macro_rules! vec {
 /// [`insert`]: ./struct.Vec.html#method.insert
 /// [`reserve`]: ./struct.Vec.html#method.reserve
 /// [owned slice]: https://doc.rust-lang.org/nightly/std/boxed/struct.Box.html
-pub struct Vec<'bump, T: 'bump> {
-    buf: RawVec<'bump, T>,
+pub struct Vec<T, B = AbortAlloc<Global>>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    buf: RawVec<T, B>,
     len: usize,
 }
 
@@ -521,8 +530,12 @@ pub struct Vec<'bump, T: 'bump> {
 // Inherent methods
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<'bump, T: 'bump> Vec<'bump, T> {
-    /// Constructs a new, empty `Vec<'bump, T>`.
+impl<T, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    /// Constructs a new, empty `Vec<T, B>`.
     ///
     /// The vector will not allocate until elements are pushed onto it.
     ///
@@ -536,14 +549,14 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// let mut vec: Vec<i32> = Vec::new_in(&b);
     /// ```
     #[inline]
-    pub fn new_in(bump: &'bump Bump) -> Vec<'bump, T> {
+    pub fn new_in(alloc: B::Ref) -> Self {
         Vec {
-            buf: RawVec::new_in(bump),
+            buf: RawVec::new_in(alloc),
             len: 0,
         }
     }
 
-    /// Constructs a new, empty `Vec<'bump, T>` with the specified capacity.
+    /// Constructs a new, empty `Vec<T, B>` with the specified capacity.
     ///
     /// The vector will be able to hold exactly `capacity` elements without
     /// reallocating. If `capacity` is 0, the vector will not allocate.
@@ -576,11 +589,11 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// vec.push(11);
     /// ```
     #[inline]
-    pub fn with_capacity_in(capacity: usize, bump: &'bump Bump) -> Vec<'bump, T> {
-        Vec {
-            buf: RawVec::with_capacity_in(capacity, bump),
+    pub fn try_with_capacity_in(capacity: usize, alloc: B::Ref) -> Result<Self, CollectionAllocErr<B>> {
+        Ok(Vec {
+            buf: RawVec::try_with_capacity_in(capacity, alloc)?,
             len: 0,
-        }
+        })
     }
 
     /// Construct a new `Vec` from the given iterator's items.
@@ -595,20 +608,20 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// let v = Vec::from_iter_in(iter::repeat(7).take(3), &b);
     /// assert_eq!(v, [7, 7, 7]);
     /// ```
-    pub fn from_iter_in<I: IntoIterator<Item = T>>(iter: I, bump: &'bump Bump) -> Vec<'bump, T> {
-        let mut v = Vec::new_in(bump);
-        v.extend(iter);
-        v
+    pub fn try_from_iter_in<I: IntoIterator<Item = T>>(iter: I, alloc: B::Ref) -> Result<Self, CollectionAllocErr<B>> {
+        let mut v = Vec::new_in(alloc);
+        v.try_extend(iter)?;
+        Ok(v)
     }
 
-    /// Creates a `Vec<'bump, T>` directly from the raw components of another vector.
+    /// Creates a `Vec<T, B>` directly from the raw components of another vector.
     ///
     /// # Safety
     ///
     /// This is highly unsafe, due to the number of invariants that aren't
     /// checked:
     ///
-    /// * `ptr` needs to have been previously allocated via [`String`]/`Vec<'bump, T>`
+    /// * `ptr` needs to have been previously allocated via [`String`]/`Vec<T, B>`
     ///   (at least, it's highly likely to be incorrect if it wasn't).
     /// * `ptr`'s `T` needs to have the same size and alignment as it was allocated with.
     /// * `length` needs to be less than or equal to `capacity`.
@@ -619,7 +632,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// to build a `Vec<u8>` from a pointer to a C `char` array and a `size_t`.
     ///
     /// The ownership of `ptr` is effectively transferred to the
-    /// `Vec<'bump, T>` which may then deallocate, reallocate or change the
+    /// `Vec<T, B>` which may then deallocate, reallocate or change the
     /// contents of memory pointed to by the pointer at will. Ensure
     /// that nothing else uses the pointer after calling this
     /// function.
@@ -662,10 +675,10 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
         ptr: *mut T,
         length: usize,
         capacity: usize,
-        bump: &'bump Bump,
-    ) -> Vec<'bump, T> {
+        alloc: B,
+    ) -> Self {
         Vec {
-            buf: RawVec::from_raw_parts_in(ptr, capacity, bump),
+            buf: RawVec::from_raw_parts_in(ptr, capacity, alloc),
             len: length,
         }
     }
@@ -684,11 +697,11 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// ```
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.buf.cap()
+        self.buf.capacity()
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the given `Vec<'bump, T>`. The collection may reserve more space to avoid
+    /// in the given `Vec<T, B>`. The collection may reserve more space to avoid
     /// frequent reallocations. After calling `reserve`, capacity will be
     /// greater than or equal to `self.len() + additional`. Does nothing if
     /// capacity is already sufficient.
@@ -707,12 +720,12 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// vec.reserve(10);
     /// assert!(vec.capacity() >= 11);
     /// ```
-    pub fn reserve(&mut self, additional: usize) {
-        self.buf.reserve(self.len, additional);
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), CollectionAllocErr<B>> {
+        self.buf.try_reserve(self.len, additional)
     }
 
     /// Reserves the minimum capacity for exactly `additional` more elements to
-    /// be inserted in the given `Vec<'bump, T>`. After calling `reserve_exact`,
+    /// be inserted in the given `Vec<T, B>`. After calling `reserve_exact`,
     /// capacity will be greater than or equal to `self.len() + additional`.
     /// Does nothing if the capacity is already sufficient.
     ///
@@ -734,8 +747,8 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// vec.reserve_exact(10);
     /// assert!(vec.capacity() >= 11);
     /// ```
-    pub fn reserve_exact(&mut self, additional: usize) {
-        self.buf.reserve_exact(self.len, additional);
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), CollectionAllocErr<B>> {
+        self.buf.try_reserve_exact(self.len, additional)
     }
 
     /// Shrinks the capacity of the vector as much as possible.
@@ -756,31 +769,11 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// vec.shrink_to_fit();
     /// assert!(vec.capacity() >= 3);
     /// ```
-    pub fn shrink_to_fit(&mut self) {
+    pub fn try_shrink_to_fit(&mut self) -> Result<(), CollectionAllocErr<B>> {
         if self.capacity() != self.len {
-            self.buf.shrink_to_fit(self.len);
-        }
-    }
-
-    /// Converts the vector into `&'bump [T]`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use bumpalo::{Bump, collections::Vec};
-    ///
-    /// let b = Bump::new();
-    /// let v = bumpalo::vec![in &b; 1, 2, 3];
-    ///
-    /// let slice = v.into_bump_slice();
-    /// assert_eq!(slice, [1, 2, 3]);
-    /// ```
-    pub fn into_bump_slice(mut self) -> &'bump [T] {
-        unsafe {
-            let ptr = self.as_mut_ptr();
-            let len = self.len();
-            mem::forget(self);
-            slice::from_raw_parts(ptr, len)
+            self.buf.try_shrink_to_fit(self.len)
+        } else {
+            Ok(())
         }
     }
 
@@ -1020,13 +1013,13 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// vec.insert(4, 5);
     /// assert_eq!(vec, [1, 4, 2, 3, 5]);
     /// ```
-    pub fn insert(&mut self, index: usize, element: T) {
+    pub fn try_insert(&mut self, index: usize, element: T) -> Result<(), CollectionAllocErr<B>> {
         let len = self.len();
         assert!(index <= len);
 
         // space for the new element
-        if len == self.buf.cap() {
-            self.reserve(1);
+        if len == self.buf.capacity() {
+            self.try_reserve(1)?;
         }
 
         unsafe {
@@ -1043,6 +1036,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
             }
             self.set_len(len + 1);
         }
+        Ok(())
     }
 
     /// Removes and returns the element at position `index` within the vector,
@@ -1108,7 +1102,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
         self.drain_filter(|x| !f(x));
     }
 
-    fn drain_filter<'a, F>(&'a mut self, filter: F) -> DrainFilter<'a, 'bump, T, F>
+    fn drain_filter<'a, F>(&'a mut self, filter: F) -> DrainFilter<'a, T, F, B>
     where
         F: FnMut(&mut T) -> bool,
     {
@@ -1206,17 +1200,18 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// assert_eq!(vec, [1, 2, 3]);
     /// ```
     #[inline]
-    pub fn push(&mut self, value: T) {
+    pub fn try_push(&mut self, value: T) -> Result<(), CollectionAllocErr<B>> {
         // This will panic or abort if we would allocate > isize::MAX bytes
         // or if the length increment would overflow for zero-sized types.
-        if self.len == self.buf.cap() {
-            self.reserve(1);
+        if self.len == self.buf.capacity() {
+            self.try_reserve(1)?;
         }
         unsafe {
             let end = self.as_mut_ptr().add(self.len);
             ptr::write(end, value);
             self.len += 1;
         }
+        Ok(())
     }
 
     /// Removes the last element from a vector and returns it, or [`None`] if it
@@ -1267,21 +1262,23 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// assert_eq!(vec2, []);
     /// ```
     #[inline]
-    pub fn append(&mut self, other: &mut Self) {
+    pub fn try_append(&mut self, other: &mut Self) -> Result<(), CollectionAllocErr<B>> {
         unsafe {
-            self.append_elements(other.as_slice() as _);
+            self.try_append_elements(other.as_slice() as _)?;
             other.set_len(0);
         }
+        Ok(())
     }
 
     /// Appends elements to `Self` from other buffer.
     #[inline]
-    unsafe fn append_elements(&mut self, other: *const [T]) {
+    unsafe fn try_append_elements(&mut self, other: *const [T]) -> Result<(), CollectionAllocErr<B>> {
         let count = (*other).len();
-        self.reserve(count);
+        self.try_reserve(count)?;
         let len = self.len();
         ptr::copy_nonoverlapping(other as *const T, self.get_unchecked_mut(len), count);
         self.len += count;
+        Ok(())
     }
 
     /// Creates a draining iterator that removes the specified range in the vector
@@ -1317,7 +1314,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// v.drain(..);
     /// assert_eq!(v, &[]);
     /// ```
-    pub fn drain<R>(&mut self, range: R) -> Drain<T>
+    pub fn drain<R>(&mut self, range: R) -> Drain<T, B>
     where
         R: RangeBounds<usize>,
     {
@@ -1444,11 +1441,326 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// assert_eq!(vec2, [2, 3]);
     /// ```
     #[inline]
+    pub fn try_split_off(&mut self, at: usize) -> Result<Self, CollectionAllocErr<B>> {
+        assert!(at <= self.len(), "`at` out of bounds");
+
+        let other_len = self.len - at;
+        let mut other = Vec::try_with_capacity_in(other_len, self.buf.alloc_ref().0)?;
+
+        // Unsafely `set_len` and copy items to `other`.
+        unsafe {
+            self.set_len(at);
+            other.set_len(other_len);
+
+            ptr::copy_nonoverlapping(self.as_ptr().add(at), other.as_mut_ptr(), other.len());
+        }
+        Ok(other)
+    }
+
+    #[inline]
+    fn try_extend<I: IntoIterator<Item = T>>(&mut self, iter: I) -> Result<(), CollectionAllocErr<B>> {
+        iter.into_iter().try_for_each(|t| self.try_push(t))
+    }
+}
+
+impl<T: Clone, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    /// Resizes the `Vec` in-place so that `len` is equal to `new_len`.
+    ///
+    /// If `new_len` is greater than `len`, the `Vec` is extended by the
+    /// difference, with each additional slot filled with `value`.
+    /// If `new_len` is less than `len`, the `Vec` is simply truncated.
+    ///
+    /// This method requires [`Clone`] to be able clone the passed value. If
+    /// you need more flexibility (or want to rely on [`Default`] instead of
+    /// [`Clone`]), use [`resize_with`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = bumpalo::vec![in &b; "hello"];
+    /// vec.resize(3, "world");
+    /// assert_eq!(vec, ["hello", "world", "world"]);
+    ///
+    /// let mut vec = bumpalo::vec![in &b; 1, 2, 3, 4];
+    /// vec.resize(2, 0);
+    /// assert_eq!(vec, [1, 2]);
+    /// ```
+    ///
+    /// [`Clone`]: https://doc.rust-lang.org/nightly/std/clone/trait.Clone.html
+    /// [`Default`]: https://doc.rust-lang.org/nightly/std/default/trait.Default.html
+    /// [`resize_with`]: #method.resize_with
+    pub fn try_resize(&mut self, new_len: usize, value: T) -> Result<(), CollectionAllocErr<B>> {
+        let len = self.len();
+
+        if new_len > len {
+            self.try_extend_with(new_len - len, ExtendElement(value))?;
+        } else {
+            self.truncate(new_len);
+        }
+        Ok(())
+    }
+
+    /// Clones and appends all elements in a slice to the `Vec`.
+    ///
+    /// Iterates over the slice `other`, clones each element, and then appends
+    /// it to this `Vec`. The `other` vector is traversed in-order.
+    ///
+    /// Note that this function is same as [`extend`] except that it is
+    /// specialized to work with slices instead. If and when Rust gets
+    /// specialization this function will likely be deprecated (but still
+    /// available).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = bumpalo::vec![in &b; 1];
+    /// vec.extend_from_slice(&[2, 3, 4]);
+    /// assert_eq!(vec, [1, 2, 3, 4]);
+    /// ```
+    ///
+    /// [`extend`]: #method.extend
+    pub fn try_extend_from_slice(&mut self, other: &[T]) -> Result<(), CollectionAllocErr<B>> {
+        self.try_extend(other.iter().cloned())?;
+        Ok(())
+    }
+}
+
+impl<T, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
+    /// Shrinks the capacity of the vector as much as possible.
+    ///
+    /// It will drop down as close as possible to the length but the allocator
+    /// may still inform the vector that there is space for a few more elements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = Vec::with_capacity_in(10, &b);
+    /// vec.extend([1, 2, 3].iter().cloned());
+    /// assert_eq!(vec.capacity(), 10);
+    /// vec.shrink_to_fit();
+    /// assert!(vec.capacity() >= 3);
+    /// ```
+    pub fn shrink_to_fit(&mut self) {
+        if self.capacity() != self.len {
+            self.buf.shrink_to_fit(self.len)
+        }
+    }
+
+    /// Constructs a new, empty `Vec<T, B>` with the specified capacity.
+    ///
+    /// The vector will be able to hold exactly `capacity` elements without
+    /// reallocating. If `capacity` is 0, the vector will not allocate.
+    ///
+    /// It is important to note that although the returned vector has the
+    /// *capacity* specified, the vector will have a zero *length*. For an
+    /// explanation of the difference between length and capacity, see
+    /// *[Capacity and reallocation]*.
+    ///
+    /// [Capacity and reallocation]: #capacity-and-reallocation
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = Vec::with_capacity_in(10, &b);
+    ///
+    /// // The vector contains no items, even though it has capacity for more
+    /// assert_eq!(vec.len(), 0);
+    ///
+    /// // These are all done without reallocating...
+    /// for i in 0..10 {
+    ///     vec.push(i);
+    /// }
+    ///
+    /// // ...but this may make the vector reallocate
+    /// vec.push(11);
+    /// ```
+    #[inline]
+    pub fn with_capacity_in(capacity: usize, alloc: B::Ref) -> Self {
+        Vec {
+            buf: RawVec::with_capacity_in(capacity, alloc),
+            len: 0,
+        }
+    }
+
+    /// Reserves capacity for at least `additional` more elements to be inserted
+    /// in the given `Vec<T, B>`. The collection may reserve more space to avoid
+    /// frequent reallocations. After calling `reserve`, capacity will be
+    /// greater than or equal to `self.len() + additional`. Does nothing if
+    /// capacity is already sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity overflows `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    /// let mut vec = bumpalo::vec![in &b; 1];
+    /// vec.reserve(10);
+    /// assert!(vec.capacity() >= 11);
+    /// ```
+    pub fn reserve(&mut self, additional: usize) {
+        self.buf.reserve(self.len, additional)
+    }
+
+    /// Reserves the minimum capacity for exactly `additional` more elements to
+    /// be inserted in the given `Vec<T, B>`. After calling `reserve_exact`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if the capacity is already sufficient.
+    ///
+    /// Note that the allocator may give the collection more space than it
+    /// requests. Therefore capacity can not be relied upon to be precisely
+    /// minimal. Prefer `reserve` if future insertions are expected.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity overflows `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    /// let mut vec = bumpalo::vec![in &b; 1];
+    /// vec.reserve_exact(10);
+    /// assert!(vec.capacity() >= 11);
+    /// ```
+    pub fn reserve_exact(&mut self, additional: usize) {
+        self.buf.reserve_exact(self.len, additional)
+    }
+
+    /// Construct a new `Vec` from the given iterator's items.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    /// use std::iter;
+    ///
+    /// let b = Bump::new();
+    /// let v = Vec::from_iter_in(iter::repeat(7).take(3), &b);
+    /// assert_eq!(v, [7, 7, 7]);
+    /// ```
+    pub fn from_iter_in<I: IntoIterator<Item = T>>(iter: I, alloc: B::Ref) -> Self {
+        let mut v = Vec::new_in(alloc);
+        v.extend(iter);
+        v
+    }
+
+    /// Extend the vector by `n` values, using the given generator.
+    fn extend_with<E: ExtendWith<T>>(&mut self, n: usize, value: E) {
+        self.try_extend_with(n, value).unwrap()
+    }
+
+    /// Moves all the elements of `other` into `Self`, leaving `other` empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of elements in the vector overflows a `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = bumpalo::vec![in &b; 1, 2, 3];
+    /// let mut vec2 = bumpalo::vec![in &b; 4, 5, 6];
+    /// vec.append(&mut vec2);
+    /// assert_eq!(vec, [1, 2, 3, 4, 5, 6]);
+    /// assert_eq!(vec2, []);
+    /// ```
+    #[inline]
+    pub fn append(&mut self, other: &mut Self) {
+        self.try_append(other).unwrap()
+    }
+
+    /// Appends elements to `Self` from other buffer.
+    #[inline]
+    unsafe fn append_elements(&mut self, other: *const [T]) {
+        self.try_append_elements(other).unwrap()
+    }
+
+    /// Appends an element to the back of a collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of elements in the vector overflows a `usize`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = bumpalo::vec![in &b; 1, 2];
+    /// vec.push(3);
+    /// assert_eq!(vec, [1, 2, 3]);
+    /// ```
+    #[inline]
+    pub fn push(&mut self, value: T) {
+        self.try_push(value).unwrap()
+    }
+
+    /// Splits the collection into two at the given index.
+    ///
+    /// Returns a newly allocated `Self`. `self` contains elements `[0, at)`,
+    /// and the returned `Self` contains elements `[at, len)`.
+    ///
+    /// Note that the capacity of `self` does not change.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `at > len`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    ///
+    /// let mut vec = bumpalo::vec![in &b; 1,2,3];
+    /// let vec2 = vec.split_off(1);
+    /// assert_eq!(vec, [1]);
+    /// assert_eq!(vec2, [2, 3]);
+    /// ```
+    #[inline]
     pub fn split_off(&mut self, at: usize) -> Self {
         assert!(at <= self.len(), "`at` out of bounds");
 
         let other_len = self.len - at;
-        let mut other = Vec::with_capacity_in(other_len, self.buf.bump());
+        let mut other = Vec::with_capacity_in(other_len, self.buf.alloc_ref().0);
 
         // Unsafely `set_len` and copy items to `other`.
         unsafe {
@@ -1461,7 +1773,12 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     }
 }
 
-impl<'bump, T: 'bump + Clone> Vec<'bump, T> {
+impl<T, B> Vec<T, B>
+where
+    T: Clone,
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
     /// Resizes the `Vec` in-place so that `len` is equal to `new_len`.
     ///
     /// If `new_len` is greater than `len`, the `Vec` is extended by the
@@ -1492,13 +1809,7 @@ impl<'bump, T: 'bump + Clone> Vec<'bump, T> {
     /// [`Default`]: https://doc.rust-lang.org/nightly/std/default/trait.Default.html
     /// [`resize_with`]: #method.resize_with
     pub fn resize(&mut self, new_len: usize, value: T) {
-        let len = self.len();
-
-        if new_len > len {
-            self.extend_with(new_len - len, ExtendElement(value))
-        } else {
-            self.truncate(new_len);
-        }
+        self.try_resize(new_len, value).unwrap()
     }
 
     /// Clones and appends all elements in a slice to the `Vec`.
@@ -1525,7 +1836,35 @@ impl<'bump, T: 'bump + Clone> Vec<'bump, T> {
     ///
     /// [`extend`]: #method.extend
     pub fn extend_from_slice(&mut self, other: &[T]) {
-        self.extend(other.iter().cloned())
+        self.try_extend_from_slice(other).unwrap()
+    }
+}
+
+pub trait VecExt<'bump, T> {
+    fn into_bump_slice(self) -> &'bump [T];
+}
+
+impl<'bump, T> VecExt<'bump, T> for Vec<T, &'bump Bump> {
+    /// Converts the vector into `&'bump [T]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use bumpalo::{Bump, collections::Vec};
+    ///
+    /// let b = Bump::new();
+    /// let v = bumpalo::vec![in &b; 1, 2, 3];
+    ///
+    /// let slice = v.into_bump_slice();
+    /// assert_eq!(slice, [1, 2, 3]);
+    /// ```
+    fn into_bump_slice(mut self) -> &'bump [T] {
+        unsafe {
+            let ptr = self.as_mut_ptr();
+            let len = self.len();
+            mem::forget(self);
+            slice::from_raw_parts(ptr, len)
+        }
     }
 }
 
@@ -1545,10 +1884,14 @@ impl<T: Clone> ExtendWith<T> for ExtendElement<T> {
     }
 }
 
-impl<'bump, T: 'bump> Vec<'bump, T> {
+impl<T, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     /// Extend the vector by `n` values, using the given generator.
-    fn extend_with<E: ExtendWith<T>>(&mut self, n: usize, mut value: E) {
-        self.reserve(n);
+    fn try_extend_with<E: ExtendWith<T>>(&mut self, n: usize, mut value: E) -> Result<(), CollectionAllocErr<B>> {
+        self.try_reserve(n)?;
 
         unsafe {
             let mut ptr = self.as_mut_ptr().add(self.len());
@@ -1573,6 +1916,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
 
             // len set by scope guard
         }
+        Ok(())
     }
 }
 
@@ -1613,7 +1957,11 @@ impl<'a> Drop for SetLenOnDrop<'a> {
     }
 }
 
-impl<'bump, T: 'bump + PartialEq> Vec<'bump, T> {
+impl<T: PartialEq, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     /// Removes consecutive repeated elements in the vector according to the
     /// [`PartialEq`] trait implementation.
     ///
@@ -1642,10 +1990,14 @@ impl<'bump, T: 'bump + PartialEq> Vec<'bump, T> {
 // Common trait implementations for Vec
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<'bump, T: 'bump + Clone> Clone for Vec<'bump, T> {
+impl<T: Clone, B> Clone for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[cfg(not(test))]
-    fn clone(&self) -> Vec<'bump, T> {
-        let mut v = Vec::with_capacity_in(self.len(), self.buf.bump());
+    fn clone(&self) -> Self {
+        let mut v = Vec::with_capacity_in(self.len(), self.buf.alloc_ref().0);
         v.extend(self.iter().cloned());
         v
     }
@@ -1655,23 +2007,54 @@ impl<'bump, T: 'bump + Clone> Clone for Vec<'bump, T> {
     // `slice::to_vec`  function which is only available with cfg(test)
     // NB see the slice::hack module in slice.rs for more information
     #[cfg(test)]
-    fn clone(&self) -> Vec<'bump, T> {
+    fn clone(&self) -> Self {
+        let mut v = Vec::new_in(self.buf.alloc_ref().0);
+        v.extend(self.iter().cloned());
+        v
+    }
+}
+
+impl<T, B> Vec<T, B>
+where
+    T: Clone,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    #[cfg(not(test))]
+    pub fn try_clone(&self) -> Result<Self, CollectionAllocErr<B>> {
+        let mut v = Vec::try_with_capacity_in(self.len(), self.buf.alloc_ref().0)?;
+        v.try_extend(self.iter().cloned())?;
+        Ok(v)
+    }
+
+    // HACK(japaric): with cfg(test) the inherent `[T]::to_vec` method, which is
+    // required for this method definition, is not available. Instead use the
+    // `slice::to_vec`  function which is only available with cfg(test)
+    // NB see the slice::hack module in slice.rs for more information
+    #[cfg(test)]
+    pub fn try_clone(&self) -> Self {
         let mut v = Vec::new_in(self.buf.bump());
         v.extend(self.iter().cloned());
         v
     }
 }
 
-impl<'bump, T: 'bump + Hash> Hash for Vec<'bump, T> {
+impl<T: Hash, B> Hash for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[inline]
     fn hash<H: hash::Hasher>(&self, state: &mut H) {
         Hash::hash(&**self, state)
     }
 }
 
-impl<'bump, T, I> Index<I> for Vec<'bump, T>
+impl<T, I, B> Index<I> for Vec<T, B>
 where
     I: ::core::slice::SliceIndex<[T]>,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
 {
     type Output = I::Output;
 
@@ -1681,9 +2064,11 @@ where
     }
 }
 
-impl<'bump, T, I> IndexMut<I> for Vec<'bump, T>
+impl<T, I, B> IndexMut<I> for Vec<T, B>
 where
     I: ::core::slice::SliceIndex<[T]>,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
 {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
@@ -1691,7 +2076,11 @@ where
     }
 }
 
-impl<'bump, T: 'bump> ops::Deref for Vec<'bump, T> {
+impl<T, B> ops::Deref for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     type Target = [T];
 
     fn deref(&self) -> &[T] {
@@ -1703,7 +2092,11 @@ impl<'bump, T: 'bump> ops::Deref for Vec<'bump, T> {
     }
 }
 
-impl<'bump, T: 'bump> ops::DerefMut for Vec<'bump, T> {
+impl<T, B> ops::DerefMut for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn deref_mut(&mut self) -> &mut [T] {
         unsafe {
             let ptr = self.buf.ptr();
@@ -1713,9 +2106,13 @@ impl<'bump, T: 'bump> ops::DerefMut for Vec<'bump, T> {
     }
 }
 
-impl<'bump, T: 'bump> IntoIterator for Vec<'bump, T> {
+impl<T, B> IntoIterator for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     type Item = T;
-    type IntoIter = IntoIter<T>;
+    type IntoIter = IntoIter<T, B>;
 
     /// Creates a consuming iterator, that is, one that moves each value out of
     /// the vector (from start to end). The vector cannot be used after calling
@@ -1735,7 +2132,7 @@ impl<'bump, T: 'bump> IntoIterator for Vec<'bump, T> {
     /// }
     /// ```
     #[inline]
-    fn into_iter(mut self) -> IntoIter<T> {
+    fn into_iter(mut self) -> IntoIter<T, B> {
         unsafe {
             let begin = self.as_mut_ptr();
             // assume(!begin.is_null());
@@ -1744,17 +2141,21 @@ impl<'bump, T: 'bump> IntoIterator for Vec<'bump, T> {
             } else {
                 begin.add(self.len()) as *const T
             };
-            mem::forget(self);
             IntoIter {
                 phantom: PhantomData,
                 ptr: begin,
                 end,
+                alloc: self.buf,
             }
         }
     }
 }
 
-impl<'a, 'bump, T> IntoIterator for &'a Vec<'bump, T> {
+impl<'a, T, B> IntoIterator for &'a Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     type Item = &'a T;
     type IntoIter = slice::Iter<'a, T>;
 
@@ -1763,7 +2164,11 @@ impl<'a, 'bump, T> IntoIterator for &'a Vec<'bump, T> {
     }
 }
 
-impl<'a, 'bump, T> IntoIterator for &'a mut Vec<'bump, T> {
+impl<'a, T, B> IntoIterator for &'a mut Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     type Item = &'a mut T;
     type IntoIter = slice::IterMut<'a, T>;
 
@@ -1772,7 +2177,11 @@ impl<'a, 'bump, T> IntoIterator for &'a mut Vec<'bump, T> {
     }
 }
 
-impl<'bump, T: 'bump> Extend<T> for Vec<'bump, T> {
+impl<T, B> Extend<T> for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[inline]
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for t in iter {
@@ -1781,7 +2190,13 @@ impl<'bump, T: 'bump> Extend<T> for Vec<'bump, T> {
     }
 }
 
-impl<'bump, T: 'bump> Vec<'bump, T> {
+impl<T, B> Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef,
+    // TODO: Fallible `splice`?
+{
     /// Creates a splicing iterator that replaces the specified range in the vector
     /// with the given `replace_with` iterator and yields the removed items.
     /// `replace_with` does not need to be the same length as `range`.
@@ -1822,7 +2237,7 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
     /// assert_eq!(u, &[1, 2]);
     /// ```
     #[inline]
-    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Splice<I::IntoIter>
+    pub fn splice<R, I>(&mut self, range: R, replace_with: I) -> Splice<I::IntoIter, B>
     where
         R: RangeBounds<usize>,
         I: IntoIterator<Item = T>,
@@ -1840,20 +2255,31 @@ impl<'bump, T: 'bump> Vec<'bump, T> {
 /// append the entire slice at once.
 ///
 /// [`copy_from_slice`]: https://doc.rust-lang.org/nightly/std/primitive.slice.html#method.copy_from_slice
-impl<'a, 'bump, T: 'a + Copy> Extend<&'a T> for Vec<'bump, T> {
+impl<'a, T, B> Extend<&'a T> for Vec<T, B>
+where
+    T: 'a + Copy,
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
-        self.extend(iter.into_iter().cloned())
+        for t in iter.into_iter().copied() {
+            self.push(t);
+        }
     }
 }
 
 macro_rules! __impl_slice_eq1 {
-    ($Lhs: ty, $Rhs: ty) => {
-        __impl_slice_eq1! { $Lhs, $Rhs, Sized }
+    ([$($allocs: ident),+]; $Lhs: ty, $Rhs: ty) => {
+        __impl_slice_eq1! { [$($allocs),+]; $Lhs, $Rhs, Sized }
     };
-    ($Lhs: ty, $Rhs: ty, $Bound: ident) => {
-        impl<'a, 'b, A: $Bound, B> PartialEq<$Rhs> for $Lhs
+    ([$($allocs: ident),+]; $Lhs: ty, $Rhs: ty, $Bound: ident) => {
+        impl<$($allocs,)+ T1: $Bound, T2> PartialEq<$Rhs> for $Lhs
         where
-            A: PartialEq<B>,
+            T1: PartialEq<T2>,
+            $(
+                $allocs: BuildAllocRef,
+                $allocs::Ref: DeallocRef<BuildAlloc = $allocs> + ReallocRef,
+            )+
         {
             #[inline]
             fn eq(&self, other: &$Rhs) -> bool {
@@ -1863,17 +2289,17 @@ macro_rules! __impl_slice_eq1 {
     };
 }
 
-__impl_slice_eq1! { Vec<'a, A>, Vec<'b, B> }
-__impl_slice_eq1! { Vec<'a, A>, &'b [B] }
-__impl_slice_eq1! { Vec<'a, A>, &'b mut [B] }
+__impl_slice_eq1! { [B1, B2]; Vec<T1, B1>, Vec<T2, B2> }
+__impl_slice_eq1! { [B1]; Vec<T1, B1>, &[T2] }
+__impl_slice_eq1! { [B1]; Vec<T1, B1>, &mut [T2] }
 // __impl_slice_eq1! { Cow<'a, [A]>, Vec<'b, B>, Clone }
 
 macro_rules! array_impls {
     ($($N: expr)+) => {
         $(
             // NOTE: some less important impls are omitted to reduce code bloat
-            __impl_slice_eq1! { Vec<'a, A>, [B; $N] }
-            __impl_slice_eq1! { Vec<'a, A>, &'b [B; $N] }
+            __impl_slice_eq1! { [B1]; Vec<T1, B1>, [T2; $N] }
+            __impl_slice_eq1! { [B1]; Vec<T1, B1>, &[T2; $N] }
             // __impl_slice_eq1! { Vec<A>, &'b mut [B; $N] }
             // __impl_slice_eq1! { Cow<'a, [A]>, [B; $N], Clone }
             // __impl_slice_eq1! { Cow<'a, [A]>, &'b [B; $N], Clone }
@@ -1890,48 +2316,80 @@ array_impls! {
 }
 
 /// Implements comparison of vectors, lexicographically.
-impl<'bump, T: 'bump + PartialOrd> PartialOrd for Vec<'bump, T> {
+impl<T: PartialOrd, B> PartialOrd for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[inline]
-    fn partial_cmp(&self, other: &Vec<'bump, T>) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         PartialOrd::partial_cmp(&**self, &**other)
     }
 }
 
-impl<'bump, T: 'bump + Eq> Eq for Vec<'bump, T> {}
+impl<T: Eq, B> Eq for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
 /// Implements ordering of vectors, lexicographically.
-impl<'bump, T: 'bump + Ord> Ord for Vec<'bump, T> {
+impl<T: Ord, B> Ord for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[inline]
-    fn cmp(&self, other: &Vec<'bump, T>) -> Ordering {
+    fn cmp(&self, other: &Vec<T, B>) -> Ordering {
         Ord::cmp(&**self, &**other)
     }
 }
 
-impl<'bump, T: 'bump + fmt::Debug> fmt::Debug for Vec<'bump, T> {
+impl<T: fmt::Debug, B> fmt::Debug for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<'bump, T: 'bump> AsRef<Vec<'bump, T>> for Vec<'bump, T> {
-    fn as_ref(&self) -> &Vec<'bump, T> {
+impl<T, B> AsRef<Vec<T, B>> for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    fn as_ref(&self) -> &Vec<T, B> {
         self
     }
 }
 
-impl<'bump, T: 'bump> AsMut<Vec<'bump, T>> for Vec<'bump, T> {
-    fn as_mut(&mut self) -> &mut Vec<'bump, T> {
+impl<T, B> AsMut<Vec<T, B>> for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
+    fn as_mut(&mut self) -> &mut Vec<T, B> {
         self
     }
 }
 
-impl<'bump, T: 'bump> AsRef<[T]> for Vec<'bump, T> {
+impl<T, B> AsRef<[T]> for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn as_ref(&self) -> &[T] {
         self
     }
 }
 
-impl<'bump, T: 'bump> AsMut<[T]> for Vec<'bump, T> {
+impl<T, B> AsMut<[T]> for Vec<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn as_mut(&mut self) -> &mut [T] {
         self
     }
@@ -1939,8 +2397,12 @@ impl<'bump, T: 'bump> AsMut<[T]> for Vec<'bump, T> {
 
 // // note: test pulls in libstd, which causes errors here
 // #[cfg(not(test))]
-// impl<'bump, T: 'bump> From<Vec<'bump, T>> for Box<[T]> {
-//     fn from(v: Vec<'bump, T>) -> Box<[T]> {
+// impl<T, B> From<Vec<T, B>> for Box<[T]>
+// where
+//     B: BuildAllocRef + ReallocRef,
+//     B::Ref: BuildAllocRef,
+// {
+//     fn from(v: Vec<T, B>) -> Box<[T]> {
 //         v.into_boxed_slice()
 //     }
 // }
@@ -1949,14 +2411,14 @@ impl<'bump, T: 'bump> AsMut<[T]> for Vec<'bump, T> {
 // Clone-on-write
 ////////////////////////////////////////////////////////////////////////////////
 
-// impl<'a, 'bump, T: Clone> From<Vec<'bump, T>> for Cow<'a, [T]> {
-//     fn from(v: Vec<'bump, T>) -> Cow<'a, [T]> {
+// impl<'a, T, B: Clone> From<Vec<T, B>> for Cow<'a, [T]> {
+//     fn from(v: Vec<T, B>) -> Cow<'a, [T]> {
 //         Cow::Owned(v)
 //     }
 // }
 
-// impl<'a, 'bump, T: Clone> From<&'a Vec<'bump, T>> for Cow<'a, [T]> {
-//     fn from(v: &'a Vec<'bump, T>) -> Cow<'a, [T]> {
+// impl<'a, T, B: Clone> From<&'a Vec<T, B>> for Cow<'a, [T]> {
+//     fn from(v: &'a Vec<T, B>) -> Cow<'a, [T]> {
 //         Cow::Borrowed(v.as_slice())
 //     }
 // }
@@ -1972,20 +2434,31 @@ impl<'bump, T: 'bump> AsMut<[T]> for Vec<'bump, T> {
 ///
 /// [`Vec`]: struct.Vec.html
 /// [`IntoIterator`]: https://doc.rust-lang.org/nightly/std/iter/trait.IntoIterator.html
-pub struct IntoIter<T> {
+pub struct IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     phantom: PhantomData<T>,
     ptr: *const T,
     end: *const T,
+    alloc: RawVec<T, B>,
 }
 
-impl<T: fmt::Debug> fmt::Debug for IntoIter<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl<T: fmt::Debug, B> fmt::Debug for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("IntoIter").field(&self.as_slice()).finish()
     }
 }
 
-impl<'bump, T: 'bump> IntoIter<T> {
-    /// Returns the remaining items of this iterator as a slice.
+impl<T, B> IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{    /// Returns the remaining items of this iterator as a slice.
     ///
     /// # Examples
     ///
@@ -2026,11 +2499,23 @@ impl<'bump, T: 'bump> IntoIter<T> {
     }
 }
 
-unsafe impl<T: Send> Send for IntoIter<T> {}
-unsafe impl<T: Sync> Sync for IntoIter<T> {}
+unsafe impl<T: Send, B: Send> Send for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
-impl<'bump, T: 'bump> Iterator for IntoIter<T> {
-    type Item = T;
+unsafe impl<T: Sync, B: Sync> Sync for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
+
+impl<T, B> Iterator for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{    type Item = T;
 
     #[inline]
     fn next(&mut self) -> Option<T> {
@@ -2070,8 +2555,11 @@ impl<'bump, T: 'bump> Iterator for IntoIter<T> {
     }
 }
 
-impl<'bump, T: 'bump> DoubleEndedIterator for IntoIter<T> {
-    #[inline]
+impl<T, B> DoubleEndedIterator for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{    #[inline]
     fn next_back(&mut self) -> Option<T> {
         unsafe {
             if self.end == self.ptr {
@@ -2091,36 +2579,65 @@ impl<'bump, T: 'bump> DoubleEndedIterator for IntoIter<T> {
     }
 }
 
-impl<'bump, T: 'bump> ExactSizeIterator for IntoIter<T> {}
+impl<T, B> ExactSizeIterator for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
-impl<'bump, T: 'bump> FusedIterator for IntoIter<T> {}
+impl<T, B> FusedIterator for IntoIter<T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
-/// A draining iterator for `Vec<'bump, T>`.
+/// A draining iterator for `Vec<T, B>`.
 ///
 /// This `struct` is created by the [`drain`] method on [`Vec`].
 ///
 /// [`drain`]: struct.Vec.html#method.drain
 /// [`Vec`]: struct.Vec.html
-pub struct Drain<'a, 'bump, T: 'a + 'bump> {
+pub struct Drain<'a, T: 'a, B = AbortAlloc<Global>>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     /// Index of tail to preserve
     tail_start: usize,
     /// Length of tail
     tail_len: usize,
     /// Current remaining range to remove
     iter: slice::Iter<'a, T>,
-    vec: NonNull<Vec<'bump, T>>,
+    vec: NonNull<Vec<T, B>>,
 }
 
-impl<'a, 'bump, T: 'a + 'bump + fmt::Debug> fmt::Debug for Drain<'a, 'bump, T> {
+impl<'a, T: 'a + fmt::Debug, B> fmt::Debug for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_tuple("Drain").field(&self.iter.as_slice()).finish()
     }
 }
 
-unsafe impl<'a, 'bump, T: Sync> Sync for Drain<'a, 'bump, T> {}
-unsafe impl<'a, 'bump, T: Send> Send for Drain<'a, 'bump, T> {}
+unsafe impl<'a, T: Sync, B> Sync for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
-impl<'a, 'bump, T> Iterator for Drain<'a, 'bump, T> {
+unsafe impl<'a, T: Send, B> Send for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
+
+impl<'a, T, B> Iterator for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     type Item = T;
 
     #[inline]
@@ -2135,7 +2652,11 @@ impl<'a, 'bump, T> Iterator for Drain<'a, 'bump, T> {
     }
 }
 
-impl<'a, 'bump, T> DoubleEndedIterator for Drain<'a, 'bump, T> {
+impl<'a, T, B> DoubleEndedIterator for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     #[inline]
     fn next_back(&mut self) -> Option<T> {
         self.iter
@@ -2144,7 +2665,11 @@ impl<'a, 'bump, T> DoubleEndedIterator for Drain<'a, 'bump, T> {
     }
 }
 
-impl<'a, 'bump, T> Drop for Drain<'a, 'bump, T> {
+impl<'a, T, B> Drop for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{
     fn drop(&mut self) {
         // exhaust self first
         self.for_each(drop);
@@ -2166,9 +2691,17 @@ impl<'a, 'bump, T> Drop for Drain<'a, 'bump, T> {
     }
 }
 
-impl<'a, 'bump, T> ExactSizeIterator for Drain<'a, 'bump, T> {}
+impl<'a, T, B> ExactSizeIterator for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
-impl<'a, 'bump, T> FusedIterator for Drain<'a, 'bump, T> {}
+impl<'a, T, B> FusedIterator for Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
+{}
 
 /// A splicing iterator for `Vec`.
 ///
@@ -2178,12 +2711,20 @@ impl<'a, 'bump, T> FusedIterator for Drain<'a, 'bump, T> {}
 /// [`splice()`]: struct.Vec.html#method.splice
 /// [`Vec`]: struct.Vec.html
 #[derive(Debug)]
-pub struct Splice<'a, 'bump, I: Iterator + 'a + 'bump> {
-    drain: Drain<'a, 'bump, I::Item>,
+pub struct Splice<'a, I: Iterator + 'a, B = AbortAlloc<Global>>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
+    drain: Drain<'a, I::Item, B>,
     replace_with: I,
 }
 
-impl<'a, 'bump, I: Iterator> Iterator for Splice<'a, 'bump, I> {
+impl<'a, I: Iterator, B> Iterator for Splice<'a, I, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
     type Item = I::Item;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2195,15 +2736,26 @@ impl<'a, 'bump, I: Iterator> Iterator for Splice<'a, 'bump, I> {
     }
 }
 
-impl<'a, 'bump, I: Iterator> DoubleEndedIterator for Splice<'a, 'bump, I> {
-    fn next_back(&mut self) -> Option<Self::Item> {
+impl<'a, I: Iterator, B> DoubleEndedIterator for Splice<'a, I, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{    fn next_back(&mut self) -> Option<Self::Item> {
         self.drain.next_back()
     }
 }
 
-impl<'a, 'bump, I: Iterator> ExactSizeIterator for Splice<'a, 'bump, I> {}
+impl<'a, I: Iterator, B> ExactSizeIterator for Splice<'a, I, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{}
 
-impl<'a, 'bump, I: Iterator> Drop for Splice<'a, 'bump, I> {
+impl<'a, I: Iterator, B> Drop for Splice<'a, I, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
     fn drop(&mut self) {
         self.drain.by_ref().for_each(drop);
 
@@ -2230,7 +2782,7 @@ impl<'a, 'bump, I: Iterator> Drop for Splice<'a, 'bump, I> {
 
             // Collect any remaining elements.
             // This is a zero-length vector which does not allocate if `lower_bound` was exact.
-            let mut collected = Vec::new_in(self.drain.vec.as_ref().buf.bump());
+            let mut collected = Vec::<_, B>::new_in(self.drain.vec.as_mut().buf.alloc_ref().0);
             collected.extend(self.replace_with.by_ref());
             let mut collected = collected.into_iter();
             // Now we have an exact count.
@@ -2246,7 +2798,11 @@ impl<'a, 'bump, I: Iterator> Drop for Splice<'a, 'bump, I> {
 }
 
 /// Private helper methods for `Splice::drop`
-impl<'a, 'bump, T> Drain<'a, 'bump, T> {
+impl<'a, T, B> Drain<'a, T, B>
+where
+    B: BuildAllocRef,
+    B::Ref: AllocRef<Error = Never> + DeallocRef<BuildAlloc = B> + ReallocRef<BuildAlloc = B>,
+{
     /// The range from `self.vec.len` to `self.tail_start` contains elements
     /// that have been moved out.
     /// Fill that range as much as possible with new elements from the `replace_with` iterator.
@@ -2285,20 +2841,24 @@ impl<'a, 'bump, T> Drain<'a, 'bump, T> {
 
 /// An iterator produced by calling `drain_filter` on Vec.
 #[derive(Debug)]
-pub struct DrainFilter<'a, 'bump: 'a, T: 'a + 'bump, F>
+pub struct DrainFilter<'a, T: 'a, F, B = AbortAlloc<Global>>
 where
     F: FnMut(&mut T) -> bool,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
 {
-    vec: &'a mut Vec<'bump, T>,
+    vec: &'a mut Vec<T, B>,
     idx: usize,
     del: usize,
     old_len: usize,
     pred: F,
 }
 
-impl<'a, 'bump, T, F> Iterator for DrainFilter<'a, 'bump, T, F>
+impl<'a, T, F, B> Iterator for DrainFilter<'a, T, F, B>
 where
     F: FnMut(&mut T) -> bool,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
 {
     type Item = T;
 
@@ -2330,9 +2890,11 @@ where
     }
 }
 
-impl<'a, 'bump, T, F> Drop for DrainFilter<'a, 'bump, T, F>
+impl<'a, T, F, B> Drop for DrainFilter<'a, T, F, B>
 where
     F: FnMut(&mut T) -> bool,
+    B: BuildAllocRef,
+    B::Ref: DeallocRef<BuildAlloc = B> + ReallocRef,
 {
     fn drop(&mut self) {
         self.for_each(drop);

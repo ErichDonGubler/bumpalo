@@ -31,5 +31,8 @@ collections = []
 # no longer has any effect
 std = []
 
+[dependencies]
+alloc-wg = "0.5.1"
+
 # [profile.bench]
 # debug = true

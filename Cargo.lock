@@ -9,6 +9,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-wg"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "arrayvec"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -40,6 +45,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "bumpalo"
 version = "2.6.0"
 dependencies = [
+ "alloc-wg 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "criterion 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)",
  "quickcheck 0.8.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -585,6 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [metadata]
 "checksum aho-corasick 0.7.3 (registry+https://github.com/rust-lang/crates.io-index)" = "e6f484ae0c99fec2e858eb6134949117399f222608d84cadb3f58c1f97c2364c"
+"checksum alloc-wg 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)" = "ec560183e0087637a435f3deb0693fd52f0ee3e5879b47bce878ac05fbbdd6ce"
 "checksum arrayvec 0.4.10 (registry+https://github.com/rust-lang/crates.io-index)" = "92c7fb76bc8826a8b33b4ee5bb07a247a81e76764ab4d55e8f73e3a4d8808c71"
 "checksum atty 0.2.11 (registry+https://github.com/rust-lang/crates.io-index)" = "9a7d5b8723950951411ee34d271d99dddcc2035a16ab25310ea2c8cfd4369652"
 "checksum autocfg 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "a6d640bee2da49f60a4068a7fae53acde8982514ab7bae8b8cea9e88cbcfd799"

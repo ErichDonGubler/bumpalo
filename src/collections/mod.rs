@@ -10,8 +10,6 @@
 
 //! Collection types.
 
-mod raw_vec;
-
 pub mod vec;
 pub use self::vec::Vec;
 
